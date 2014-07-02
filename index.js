@@ -1,8 +1,7 @@
-'use strict';
-
 var mongoose = require('mongoose'),
 	natural = require('natural'),
-	_ = require('underscore');
+	_ = require('underscore'),
+	Batch = require('batch');
 
 module.exports = function(schema, options) {
 	var stemmer = natural[options.stemmer || 'PorterStemmer'],
@@ -20,6 +19,7 @@ module.exports = function(schema, options) {
 
 	// search method
 	schema.statics.search = function(query, fields, options, callback) {
+		var options;
 		if (arguments.length === 2) {
 			callback = fields;
 			options = {};
@@ -41,8 +41,26 @@ module.exports = function(schema, options) {
 		conditions[keywordsPath] = {$in: tokens};
 		outFields[keywordsPath] = 1;
 
-		mongoose.Model.find.call(this, conditions, outFields, findOptions,
-		function(err, docs) {
+		var cursor = mongoose.Model.find.call(this, conditions, outFields, findOptions)
+
+		// populate
+		var deepPopulate;
+		if (options.populate) {
+			options.populate.forEach(function(object) {
+				if(object.path.indexOf('.') != -1){
+					var s = object.path.split('.');
+					deepPopulate = {
+						path: s[0],
+						deepPath: s[1],
+						fields: object.fields
+					};
+				}else{
+					cursor.populate(object.path, object.fields);
+				}
+			});
+		}
+		
+		cursor.exec(function(err, docs) {
 			if (err) return callback(err);
 
 			var totalCount = docs.length,
@@ -57,39 +75,47 @@ module.exports = function(schema, options) {
 
 			// slice results and find full objects by ids
 			if (options.limit || options.skip) {
+				console.log('slicing');
 				options.skip = options.skip || 0;
 				options.limit = options.limit || (docs.length - options.skip);
 				docs = docs.slice(options.skip || 0, options.skip + options.limit);
 			}
 
-			var docsHash = _(docs).indexBy('_id'),
-				findConditions = _({
-					_id: {$in: _(docs).pluck('_id')}
-				}).extend(options.conditions);
+			if(deepPopulate){
 
-			var cursor = mongoose.Model.find
-			.call(self, findConditions, fields, findOptions);
+				var b = new Batch();
+				docs.forEach(function(doc){
+					console.log(doc._id)
+					b.push(function(done){
+						var options = {
+							path: deepPopulate.deepPath
+						}
+						if(deepPopulate.fields) options.select = deepPopulate.fields;
 
-			// populate
-			if (options.populate) {
-				options.populate.forEach(function(object) {
-					cursor.populate(object.path, object.fields);
+						doc[deepPopulate.path].populate(options, done);
+					});
 				});
-			}
+				b.end(function(err, docs){
+					if(err) console.log(err);
+					callback(null, {
+						results: _(docs)[processMethod](function(doc) {
+							console.log(doc._id);
+							var relevance = docsHash[doc._id].get(relevancePath);
+							doc.set(relevancePath, relevance);
+							return processMethod === 'map' ? doc : -relevance;
+						}),
+						totalCount: totalCount
+					});
+				});
 
-			cursor.exec(function(err, docs) {
-				if (err) return callback(err);
+			}else{
 
 				// sort result docs
 				callback(null, {
-					results: _(docs)[processMethod](function(doc) {
-						var relevance = docsHash[doc._id].get(relevancePath);
-						doc.set(relevancePath, relevance);
-						return processMethod === 'map' ? doc : -relevance;
-					}),
+					results: docs,
 					totalCount: totalCount
 				});
-			});
+			}
 		});
 
 		function processRelevance(queryTokens, resultTokens) {

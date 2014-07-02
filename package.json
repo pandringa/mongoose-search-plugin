@@ -20,6 +20,7 @@
   "author": "Pavel Vlasov <freakycue@gmail.com>",
   "license": "MIT",
   "dependencies": {
+    "batch": "^0.5.1",
     "natural": "~0.1.25",
     "underscore": "~1.5.2"
   },
